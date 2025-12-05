@@ -1,25 +1,40 @@
--- LearnLynk Tech Test - Task 2: RLS Policies on leads
+ALTER TABLE public.leads ENABLE ROW LEVEL SECURITY;
 
-alter table public.leads enable row level security;
+CREATE POLICY select_leads_policy
+ON public.leads
+FOR SELECT
+USING (
+    -- tenant_id column is likely UUID or TEXT, so cast JSON to text
+    tenant_id = (current_setting('request.jwt.claims', true)::json->>'tenant_id')::bigint
 
--- Example helper: assume JWT has tenant_id, user_id, role.
--- You can use: current_setting('request.jwt.claims', true)::jsonb
+    AND (
+        -- Admins: full tenant access
+        (current_setting('request.jwt.claims', true)::json->>'role') = 'admin'
 
--- TODO: write a policy so:
--- - counselors see leads where they are owner_id OR in one of their teams
--- - admins can see all leads of their tenant
+        OR
 
+        -- Counselors: can see leads they own
+        owner_id = ((current_setting('request.jwt.claims', true)::json->>'user_id')::bigint)
 
--- Example skeleton for SELECT (replace with your own logic):
+        OR
 
-create policy "leads_select_policy"
-on public.leads
-for select
-using (
-  true
-  -- TODO: add real RLS logic here, refer to README instructions
+        -- Counselors: can see leads of teams they belong to
+        team_id IN (
+            SELECT ut.team_id
+            FROM user_teams ut
+            WHERE ut.user_id = ((current_setting('request.jwt.claims', true)::json->>'user_id')::bigint)
+        )
+    )
 );
 
--- TODO: add INSERT policy that:
--- - allows counselors/admins to insert leads for their tenant
--- - ensures tenant_id is correctly set/validated
+CREATE POLICY insert_leads_policy
+ON public.leads
+FOR INSERT
+WITH CHECK (
+    -- Ensure tenant matches, cast claim to text
+    tenant_id = (current_setting('request.jwt.claims', true)::json->>'tenant_id')::bigint
+
+    AND (
+        (current_setting('request.jwt.claims', true)::json->>'role') IN ('admin', 'counselor')
+    )
+);

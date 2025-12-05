@@ -20,47 +20,104 @@ type CreateTaskPayload = {
 const VALID_TYPES = ["call", "email", "review"];
 
 serve(async (req: Request) => {
-  if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      status: 405,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
   try {
-    const body = (await req.json()) as Partial<CreateTaskPayload>;
+    if (req.method !== "POST") {
+      return new Response(JSON.stringify({ error: "Only POST supported" }), {
+        status: 400,
+      });
+    }
+
+    const body = await req.json().catch(() => null);
+
+    if (!body) {
+      return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+        status: 400,
+      });
+    }
+
     const { application_id, task_type, due_at } = body;
 
-    // TODO: validate application_id, task_type, due_at
-    // - check task_type in VALID_TYPES
-    // - parse due_at and ensure it's in the future
+    // --- Validation ---
+    const validTaskTypes = ["call", "email", "review"];
 
-    // TODO: insert into tasks table using supabase client
+    if (!application_id || typeof application_id !== "string") {
+      return new Response(
+        JSON.stringify({ error: "application_id is required" }),
+        { status: 400 }
+      );
+    }
 
-    // Example:
-    // const { data, error } = await supabase
-    //   .from("tasks")
-    //   .insert({ ... })
-    //   .select()
-    //   .single();
+    if (!validTaskTypes.includes(task_type)) {
+      return new Response(JSON.stringify({ error: "Invalid task_type" }), {
+        status: 400,
+      });
+    }
 
-    // TODO: handle error and return appropriate status code
+    const dueDate = new Date(due_at);
+    if (isNaN(dueDate.getTime())) {
+      return new Response(
+        JSON.stringify({ error: "due_at must be a valid date" }),
+        { status: 400 }
+      );
+    }
 
-    // Example successful response:
-    // return new Response(JSON.stringify({ success: true, task_id: data.id }), {
-    //   status: 200,
-    //   headers: { "Content-Type": "application/json" },
-    // });
+    if (dueDate <= new Date()) {
+      return new Response(
+        JSON.stringify({ error: "due_at must be in the future" }),
+        { status: 400 }
+      );
+    }
+
+    // --- Insert Task into Database ---
+    const { data, error } = await supabase
+      .from("tasks")
+      .insert({
+        related_id: application_id,
+        type: task_type,
+        due_at: dueDate.toISOString(),
+        tenant_id: null, // If tenant_id must be looked up, update this logic.
+      })
+      .select("id")
+      .single();
+
+    if (error) {
+      console.error("DB Insert Error:", error);
+      return new Response(JSON.stringify({ error: "Failed to insert task" }), {
+        status: 500,
+      });
+    }
+
+    const taskId = data.id;
+
+    // --- Emit Realtime Event ---
+    const realtimeRes = await supabase.realtime.send({
+      type: "broadcast",
+      channel: "task.created",
+      event: "task.created",
+      payload: {
+        task_id: taskId,
+        application_id,
+        task_type,
+        due_at: due_at,
+      },
+    });
+
+    if (!realtimeRes.success) {
+      console.error("Realtime error:", realtimeRes);
+      // Still return success — app may not want task creation to fail
+    }
 
     return new Response(
-      JSON.stringify({ error: "Not implemented. Please complete this function." }),
-      { status: 501, headers: { "Content-Type": "application/json" } },
+      JSON.stringify({
+        success: true,
+        task_id: taskId,
+      }),
+      { status: 200 }
     );
   } catch (err) {
-    console.error(err);
+    console.error("Unexpected Error:", err);
     return new Response(JSON.stringify({ error: "Internal server error" }), {
       status: 500,
-      headers: { "Content-Type": "application/json" },
     });
   }
 });
